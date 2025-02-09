@@ -1,87 +1,183 @@
 #include <QTRSensors.h>
 
-// Define sensor pins
-#define NUM_SENSORS 8
-unsigned int sensorValues[NUM_SENSORS];
+//--------Pin definitions for the TB6612FNG Motor Driver----
+#define AIN1 4
+#define BIN1 6
+#define AIN2 3
+#define BIN2 7
+#define PWMA 9
+#define PWMB 10
+//------------------------------------------------------------
 
-// Define motor pins
-#define LEFT_MOTOR_FORWARD 5
-#define LEFT_MOTOR_BACKWARD 6
-#define RIGHT_MOTOR_FORWARD 9
-#define RIGHT_MOTOR_BACKWARD 10
-
-// PID constants
-float Kp = 0.1;  // Proportional gain
-float Ki = 0.0;  // Integral gain
-float Kd = 0.05; // Derivative gain
-
-// Speed settings
-int maxSpeed = 150; // Maximum speed of the motors
-int baseSpeed = 100; // Base speed of the motors
+//--------Enter Line Details here---------
+bool isBlackLine = 1;  // Keep 1 for black line, 0 for white line
+//-----------------------------------------
 
 // PID variables
-int lastError = 0;
-int integral = 0;
+int P, D, I, previousError, PIDvalue;
+double error;
+int lsp, rsp;
+int lfSpeed = 150;
+int currentSpeed = 40;
+int sensorWeight[8] = { 8, 4, 2, 1, -1, -2, -4, -8 };
+int activeSensors;
+float Kp = 0.06;
+float Kd = 0.8;
+float Ki = 0.00001;
 
-// QTR sensor object
+int onLine = 1;
+int blackLineCounter = 0;  // Counter to check if the robot has reached the end
+
+// QTR Sensor setup
 QTRSensors qtr;
-const uint8_t SensorPins[NUM_SENSORS] = {A0, A1, A2, A3, A4, A5, A6, A7};
+const uint8_t SensorPins[8] = { A0, A1, A2, A3, A4, A5, A6, A7 };
+uint16_t sensorValues[8];
 
 void setup() {
-  // Initialize motor pins as output
-  pinMode(LEFT_MOTOR_FORWARD, OUTPUT);
-  pinMode(LEFT_MOTOR_BACKWARD, OUTPUT);
-  pinMode(RIGHT_MOTOR_FORWARD, OUTPUT);
-  pinMode(RIGHT_MOTOR_BACKWARD, OUTPUT);
+  Serial.begin(9600);
 
-  // Configure the QTR sensors
-  qtr.setTypeRC(); // Set the sensor type to RC (reflectance)
-  qtr.setSensorPins(SensorPins, NUM_SENSORS);
+  // Initialize motor pins
+  pinMode(AIN1, OUTPUT);
+  pinMode(AIN2, OUTPUT);
+  pinMode(BIN1, OUTPUT);
+  pinMode(BIN2, OUTPUT);
+  pinMode(PWMA, OUTPUT);
+  pinMode(PWMB, OUTPUT);
+  pinMode(11, INPUT_PULLUP);  // Pushbutton
+  pinMode(12, INPUT_PULLUP);  // Pushbutton
+  pinMode(13, OUTPUT);        // LED
 
-  // Calibrate the QTR sensors
+  pinMode(5, OUTPUT);      // Standby for older carrier boards
+  digitalWrite(5, HIGH);   // Enables the motor driver
+
+  // Configure QTR sensor
+  qtr.setTypeRC();  // Set sensor type to RC (reflectance)
+  qtr.setSensorPins(SensorPins, 8);
+
+  // Calibrate QTR sensor
+  calibrate();
+}
+
+void loop() {
+  // Wait for button press to start
+  while (digitalRead(11)) {}
+  delay(1000);
+
+  while (1) {
+    readLine();
+    if (currentSpeed < lfSpeed) currentSpeed++;
+    
+    if (onLine == 1) {  // PID LINE FOLLOW
+      linefollow();
+      digitalWrite(13, HIGH);
+      blackLineCounter = 0;  // Reset counter when line following normally
+    } else {
+      digitalWrite(13, LOW);
+      blackLineCounter++;
+      
+      if (blackLineCounter > 100) {  // If black detected for a long time
+        stopMotors();
+        break;
+      }
+    }
+  }
+}
+
+void linefollow() {
+  error = 0;
+  activeSensors = 0;
+
+  // Calculate error using QTR sensor values
+  uint16_t position = qtr.readLineBlack(sensorValues);
+  error = position - 3500;  // 3500 is the center of the line
+
+  // PID calculations
+  P = error;
+  I = I + error;
+  D = error - previousError;
+
+  PIDvalue = (Kp * P) + (Ki * I) + (Kd * D);
+  previousError = error;
+
+  // Adjust motor speeds
+  lsp = currentSpeed - PIDvalue;
+  rsp = currentSpeed + PIDvalue;
+
+  // Constrain motor speeds
+  lsp = constrain(lsp, 0, 255);
+  rsp = constrain(rsp, -70, 255);
+
+  // Run motors
+  motor1run(rsp);
+  motor2run(lsp);
+}
+
+void calibrate() {
+  // Calibrate QTR sensor
   for (int i = 0; i < 100; i++) {
     qtr.calibrate();
     delay(10);
   }
+
+  // Stop motors after calibration
+  motor1run(0);
+  motor2run(0);
 }
 
-void loop() {
-  // Read sensor values
+void readLine() {
+  onLine = 0;
+
+  // Read QTR sensor values
   uint16_t position = qtr.readLineBlack(sensorValues);
 
-  // Calculate error
-  int error = position - 3500; // 3500 is the ideal position (center of the line)
-
-  // Calculate PID terms
-  int proportional = error;
-  integral += error;
-  int derivative = error - lastError;
-
-  // Calculate motor speed adjustment
-  int adjustment = Kp * proportional + Ki * integral + Kd * derivative;
-
-  // Adjust motor speeds
-  int leftMotorSpeed = baseSpeed + adjustment;
-  int rightMotorSpeed = baseSpeed - adjustment;
-
-  // Constrain motor speeds to maxSpeed
-  leftMotorSpeed = constrain(leftMotorSpeed, 0, maxSpeed);
-  rightMotorSpeed = constrain(rightMotorSpeed, 0, maxSpeed);
-
-  // Set motor speeds
-  setMotorSpeed(LEFT_MOTOR_FORWARD, LEFT_MOTOR_BACKWARD, leftMotorSpeed);
-  setMotorSpeed(RIGHT_MOTOR_FORWARD, RIGHT_MOTOR_BACKWARD, rightMotorSpeed);
-
-  // Update last error
-  lastError = error;
+  // Check if the robot is on the line
+  for (int i = 0; i < 8; i++) {
+    if (sensorValues[i] > 500) {
+      onLine = 1;
+      break;
+    }
+  }
 }
 
-void setMotorSpeed(int forwardPin, int backwardPin, int speed) {
-  if (speed > 0) {
-    analogWrite(forwardPin, speed);
-    analogWrite(backwardPin, 0);
+//--------Function to run Motor 1-----------------
+void motor1run(int motorSpeed) {
+  motorSpeed = constrain(motorSpeed, -255, 255);
+  if (motorSpeed > 0) {
+    digitalWrite(AIN1, 1);
+    digitalWrite(AIN2, 0);
+    analogWrite(PWMA, motorSpeed);
+  } else if (motorSpeed < 0) {
+    digitalWrite(AIN1, 0);
+    digitalWrite(AIN2, 1);
+    analogWrite(PWMA, abs(motorSpeed));
   } else {
-    analogWrite(forwardPin, 0);
-    analogWrite(backwardPin, -speed);
+    digitalWrite(AIN1, 1);
+    digitalWrite(AIN2, 1);
+    analogWrite(PWMA, 0);
   }
+}
+
+//--------Function to run Motor 2-----------------
+void motor2run(int motorSpeed) {
+  motorSpeed = constrain(motorSpeed, -255, 255);
+  if (motorSpeed > 0) {
+    digitalWrite(BIN1, 1);
+    digitalWrite(BIN2, 0);
+    analogWrite(PWMB, motorSpeed);
+  } else if (motorSpeed < 0) {
+    digitalWrite(BIN1, 0);
+    digitalWrite(BIN2, 1);
+    analogWrite(PWMB, abs(motorSpeed));
+  } else {
+    digitalWrite(BIN1, 1);
+    digitalWrite(BIN2, 1);
+    analogWrite(PWMB, 0);
+  }
+}
+
+//--------Function to stop motors-----------------
+void stopMotors() {
+  motor1run(0);
+  motor2run(0);
+  Serial.println("End reached! Stopping...");
 }
